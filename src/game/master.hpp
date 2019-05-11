@@ -1,6 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <iostream>
+#include <mutex>
+#include <thread>
 
 #include "audio/complete.h"
 #include "gameutils/adaptive_viewport.h"

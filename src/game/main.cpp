@@ -1,3 +1,5 @@
+#include <process.hpp>
+
 const ivec2 screen_size(480, 270);
 Interface::Window window("Delta", screen_size * 2, Interface::windowed, Interface::WindowSettings{} with_(min_size = screen_size));
 Graphics::DummyVertexArray dummy_vao;
@@ -10,158 +12,7 @@ Input::Mouse mouse;
 ImFont *font_main;
 ImFont *font_mono;
 
-std::string text = &1[R"(
-Student GPSS/H Release 3.70 (PR221)      6 May 2019   22:01:45     File: 4.gps
-
-    Line# Stmt#  If Do  Block#  *Loc    Operation  A,B,C,D,E,F,G    Comments
-
-        1     1                         SIMULATE
-        2     2                         INITIAL    X$NNN,15
-        3     3              1          GENERATE   ,,,1,10
-        4     4              2    LAB1  TEST L     CH$BUF,X$NNN
-        5     5              3          ADVANCE    10
-        6     6              4          SPLIT      1,LAB1
-        7     7              5          LINK       BUF,FIFO
-        8     8
-        9     9              6          GENERATE   ,,,1,5
-       10    10              7    LAB2  TEST G     CH$BUF,0
-       11    11              8          UNLINK     BUF,LAB3,1
-       12    12              9          TERMINATE
-       13    13
-       14    14             10    LAB3  SEIZE      CPU
-       15    15             11          ADVANCE    25,5
-       16    16             12          RELEASE    CPU
-       17    17             13          TRANSFER   .02,LAB5,LAB4
-       18    18             14    LAB4  UNLINK     BUF,LAB6,ALL
-       19    19             15    LAB5  PRIORITY   5
-       20    20             16          TRANSFER   ,LAB2
-       21    21
-       22    22             17    LAB6  TERMINATE
-       23    23
-       24    24             18          GENERATE   4000
-       25    25             19          TERMINATE  1
-       26    26                         START      1
-       27    27                         END
-
-Entity Dictionary (in ascending order by entity number; "*" => value conflict.)
-
-       Facilities: 1=CPU
-
- Fullword Savexes: 1=NNN
-
-      User Chains: 1=BUF
-
-Symbol   Value   EQU Defns  Context      References by Statement Number
-
-LAB1         2           4  Block            6
-LAB2         7          10  Block           20
-LAB3        10          14  Block           11
-LAB4        14          18  Block           17
-LAB5        15          19  Block           17
-LAB6        17          22  Block           18
-
-CPU          1              Facility        14    16
-
-NNN          1              Fullword Svx     2     4
-
-BUF          1              User Chain       4     7    10    11    18
-
-
-
-Storage Requirements (Bytes)
-
-Compiled Code:     1040
-Compiled Data:      140
-Miscellaneous:        0
-Entities:           376
-Common:           32720   (Set via MAXCOM option -- can vary with model size)
------------------------
-Total:            34276
-
-
-
-GPSS/H Model Size:
-
-Control Statements      4
-Blocks                 19
-
-
-
-Simulation begins.
-
-Relative Clock: 4000.0000   Absolute Clock: 4000.0000
-
-
-
-Block Current     Total  Block Current     Total
-1                     1  11          1       158
-LAB1                218  12                  157
-3           1       218  13                  157
-4                   434  LAB4                  3
-5          14       217  LAB5                157
-6                     1  16                  157
-LAB2                158  LAB6                 45
-8                   158  18                    1
-9                   158  19                    1
-LAB3                158
-
-
-
-          --Avg-Util-During--
-Facility  Total  Avail  Unavl     Entries    Average   Current  Percent  Seizing  Preempting
-           Time   Time   Time               Time/Xact   Status   Avail     Xact      Xact
-     CPU  0.990                       158      25.063    AVAIL              205
-
-
-
-User Chain   Entries    Average      Average     Current     Maximum
-                       Time/Xact    Contents    Contents    Contents
-     BUF         217     233.349      12.659          14          15
-
-
-
-Non-zero Fullword Savevalues:  (NAME : VALUE)
-
-     NNN:          15
-
-
-
-  Random    Antithetic     Initial     Current      Sample   Chi-Square
-  Stream      Variates    Position    Position       Count   Uniformity
-       1           OFF      100000      100315         315      0.97
-
-
-
-Status of Common Storage
-
-   30456 bytes available
-    2264 in use
-    2376 used (max)
-
-Simulation complete.  Absolute Clock: 4000.0000
-
-
-
-Total Block Executions: 2557
-
-Blocks / second:        12049123
-
-Microseconds / Block:   0.08
-
-
-
-Elapsed Time Used (Sec)
-
-Pass1:           0.00
-Sym/Xref         0.00
-Pass2:           0.00
-Load/Ctrl:       0.00
-Execution:       0.00
-Output:          0.00
----------------------
-Total:           0.00
-
-)"];
+constexpr int modal_margin = 64;
 
 namespace States
 {
@@ -175,6 +26,102 @@ namespace States
 
     struct Main : Base
     {
+        struct ProcessData
+        {
+            std::optional<TinyProcessLib::Process> process;
+            std::thread thread;
+            std::atomic_bool process_ended = 0; // This is set to `true` for one tick after the process ends.
+            bool process_running = 0;
+            int should_close_popup_automatically = -1; // -1 means not decided yet.
+            float popup_alpha = 1;
+            bool using_debugger = 0;
+
+            std::string output;
+            std::mutex output_mutex;
+        };
+
+        std::unique_ptr<ProcessData> process_data = std::make_unique<ProcessData>();
+
+        std::string current_file = "4"; // Without extension.
+        std::string current_code;
+        std::string current_output;
+        bool unsaved_changes = 0;
+        bool text_input_focused = 0;
+
+        Main()
+        {
+            current_code = MemoryFile(current_file + ".gps").string();
+            FilterCharacters(current_code);
+            LoadOutput();
+        }
+
+        void FilterCharacters(std::string &str)
+        {
+            std::string new_str;
+            new_str.reserve(str.size());
+            int line_len = 0;
+            for (char ch : str)
+            {
+                if (ch == '\n')
+                {
+                    line_len = 0;
+                    new_str += '\n';
+                    continue;
+                }
+
+                if (ch == '\t')
+                {
+                    // We can't do anything fancy here, because ImGui always renders tabs as 4 spaces, and this function shouldn't change how the text looks.
+                    constexpr int tab_size = 4;
+                    line_len += tab_size;
+                    new_str += std::string(tab_size, ' ');
+                    continue;
+                }
+
+                if (ch >= 0 && ch < ' ')
+                    continue;
+
+                line_len++;
+                new_str.push_back(ch);
+            }
+
+            str = std::move(new_str);
+        }
+
+        void SaveChanges()
+        {
+            if (!unsaved_changes)
+                return;
+
+            unsaved_changes = 0;
+
+            try
+            {
+                std::string str = current_code;
+                FilterCharacters(str); // We modify a copy because text editing widget doesn't like its data being modified when it's active.
+                const uint8_t *data = reinterpret_cast<const uint8_t *>(str.c_str());
+                MemoryFile::Save(current_file + ".gps", data, data + str.size());
+            }
+            catch (std::exception &e)
+            {
+                Program::Error("Не могу сохранить файл.\n", e.what());
+            }
+        }
+
+        void LoadOutput()
+        {
+            try
+            {
+                current_output = MemoryFile(current_file + ".lis").string();
+                FilterCharacters(current_output);
+            }
+            catch (...)
+            {
+                current_output = "";
+            }
+        }
+
+
         void Tick() override
         {
             ImGui::SetNextWindowPos(ivec2(0));
@@ -188,14 +135,28 @@ namespace States
 
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ivec2(4,4));
 
+            bool run = 0;
+            bool debug = 0;
+
             if (ImGui::BeginMenuBar())
             {
                 if (ImGui::BeginMenu("Файл"))
                 {
                     ImGui::MenuItem("Открыть");
 
+                    if (ImGui::MenuItem("Сохранить", "Ctrl+S"))
+                        SaveChanges();
+
                     ImGui::EndMenu();
                 }
+                if ((Input::Button(Input::l_ctrl).down() || Input::Button(Input::r_ctrl).down()) && Input::Button(Input::s).pressed())
+                    SaveChanges();
+
+                if (ImGui::MenuItem("Запустить (F9)") || Input::Button(Input::f9).pressed())
+                    run = 1;
+
+                if (ImGui::MenuItem("Отладить (F10)") || Input::Button(Input::f10).pressed())
+                    debug = 1;
 
                 ImGui::EndMenuBar();
             }
@@ -203,17 +164,150 @@ namespace States
             ImGui::PopStyleVar(1);
             ImGui::PopStyleVar(3);
 
-            ImGui::Button("Запустить");
-            ImGui::SameLine();
-            ImGui::Button("Отладчик");
+            if (run || debug)
+            {
+                SaveChanges();
 
-            ImGui::PushFont(font_mono);
+                ImGui::OpenPopup("gpss_running");
 
-            ImGui::InputTextMultiline("###output", text.data(), text.size(), ImGui::GetContentRegionAvail(), ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll);
+                process_data->output = "";
 
-            ImGui::PopFont();
+                auto lambda_stdout = [&](const char *data, size_t size)
+                {
+                    std::cout << "-";
+                    std::scoped_lock lock(process_data->output_mutex);
+                    process_data->output.insert(process_data->output.end(), data, data+size);
+                };
+
+                process_data->process.emplace("gpssh.exe {}{}"_format(current_file, debug ? " tv" : ""), "", lambda_stdout, lambda_stdout);
+
+                process_data->process_ended = 0;
+                process_data->process_running = 1;
+                process_data->should_close_popup_automatically = -1;
+                process_data->popup_alpha = 0;
+                process_data->using_debugger = debug;
+
+                process_data->thread = std::thread([&]
+                {
+                    process_data->process->get_exit_status();
+                    process_data->process_ended = 1;
+                    std::cout << "Thread closed.";
+                });
+                process_data->thread.detach();
+            }
+
+            bool proc_ended = process_data->process_ended;
+            if (proc_ended)
+            {
+                process_data->process_ended = 0;
+                process_data->process_running = 0;
+                LoadOutput();
+            }
+
+            clamp_var(process_data->popup_alpha += (ImGui::IsPopupOpen("gpss_running") ? 0.05 : -2), 0.00001, 1); // For some reason ImGui doesn't like alpha == 0, so we use a small number instead.
+
+            if (ImGui::BeginTabBar("tabs"))
+            {
+                if (ImGui::BeginTabItem("Программа"))
+                {
+                    ImGui::PushFont(font_mono);
+                    if (ImGui::InputTextMultiline("###code_input_", &current_code, ImGui::GetContentRegionAvail(), ImGuiInputTextFlags_AllowTabInput))
+                        unsaved_changes = 1;
+
+                    bool text_input_focused_now = ImGui::IsItemActive();
+
+                    if (!text_input_focused_now && text_input_focused)
+                        FilterCharacters(current_code);
+
+                    text_input_focused = text_input_focused_now;
+
+                    ImGui::PopFont();
+
+                    ImGui::EndTabItem();
+                }
+
+                if (ImGui::BeginTabItem("Результат", 0, proc_ended * ImGuiTabItemFlags_SetSelected))
+                {
+                    if (current_output.empty())
+                    {
+                        ImGui::TextDisabled("%s", "Программа еще не была запущена.");
+                    }
+                    else
+                    {
+                        ImGui::PushFont(font_mono);
+                        ImGui::InputTextMultiline("###output", current_output.data(), current_output.size(), ImGui::GetContentRegionAvail(), ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll);
+                        ImGui::PopFont();
+                    }
+
+                    ImGui::EndTabItem();
+                }
+
+                ImGui::EndTabBar();
+            }
+
+            if (ImGui::IsPopupOpen("gpss_running"))
+            {
+                ImGui::SetNextWindowPos(ivec2(modal_margin));
+                ImGui::SetNextWindowSize(window.Size() - 2 * modal_margin);
+
+                ImGui::PushStyleVar(ImGuiStyleVar_Alpha, process_data->popup_alpha);
+
+                if (ImGui::BeginPopupModal("gpss_running", 0, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+                {
+                    if (process_data->process_running)
+                    {
+                        ImGui::TextUnformatted("Работаю...");
+
+                        ImGui::SameLine();
+
+                        if (ImGui::SmallButton("Прервать") || Input::Button(Input::escape).pressed())
+                        {
+                            process_data->process->kill();
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+                    else
+                    {
+                        if (ImGui::SmallButton("Закрыть") || Input::Button(Input::escape).pressed())
+                        {
+                            process_data->process->kill();
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+
+                    if (proc_ended)
+                    {
+                        if (process_data->should_close_popup_automatically == -1)
+                        {
+                            process_data->should_close_popup_automatically =
+                                process_data->output.find("***") == std::string::npos &&
+                                process_data->output.find("Error") == std::string::npos &&
+                                process_data->output.find("Warning") == std::string::npos; // I've never seen "Warning" in output, but I want to be extra safe.
+                        }
+
+                        if (process_data->should_close_popup_automatically)
+                        {
+                            ImGui::CloseCurrentPopup();
+                        }
+                    }
+
+                    ImGui::BeginChildFrame(1, ImGui::GetContentRegionAvail());
+                    ImGui::PushFont(font_mono);
+                    {
+                        std::scoped_lock lock(process_data->output_mutex);
+                        ImGui::TextUnformatted(process_data->output.c_str());
+                    }
+                    ImGui::PopFont();
+                    ImGui::EndChildFrame();
+
+                    ImGui::EndPopup();
+                }
+
+                ImGui::PopStyleVar();
+            }
 
             ImGui::End();
+
 
             // ImGui::ShowDemoWindow();
         }
@@ -261,7 +355,7 @@ int main()
         builder.BuildRanges(&ranges);
 
         font_main = gui_controller.LoadFont("assets/Roboto-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = ImGuiFreeType::ForceAutoHint), ranges.Data);
-        font_mono = gui_controller.LoadFont("assets/RobotoMono-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = 0), ranges.Data);
+        font_mono = gui_controller.LoadFont("assets/RobotoMono-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = ImGuiFreeType::LightHinting), ranges.Data);
         gui_controller.RenderFontsWithFreetype();
 
         Graphics::Blending::Enable();
@@ -278,7 +372,7 @@ int main()
         uint64_t delta = delta_timer();
         while (metronome.Tick(delta))
         {
-            window.ProcessEvents({gui_controller.EventHook()});
+            window.ProcessEvents({gui_controller.EventHook(gui_controller.dont_block_events)});
 
             if (window.Resized())
                 Graphics::Viewport(window.Size());
