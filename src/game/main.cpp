@@ -1,6 +1,6 @@
 #include <process.hpp>
 
-const std::string version_string = "1.0.0 rc1";
+const std::string version_string = "1.0.0 rc2";
 const std::string repo_link = "https://github.com/HolyBlackCat/gpss-gui";
 
 const ivec2 min_screen_size(480, 270);
@@ -82,7 +82,7 @@ namespace States
                     if (ok)
                         *ok = 0;
                     else
-                        Interface::MessageBox(Interface::MessageBoxType::warning, "Error", "Не могу прочитать выходной файл `{}`."_format(output_file_name));
+                        Interface::MessageBox(Interface::MessageBoxType::warning, "Ошибка", "Не могу прочитать выходной файл `{}`."_format(output_file_name));
                 }
             }
         };
@@ -108,7 +108,7 @@ namespace States
             }
             catch (...)
             {
-                Interface::MessageBox(Interface::MessageBoxType::error, "Error", "Не могу прочитать файл `{}`."_format(file_name));
+                Interface::MessageBox(Interface::MessageBoxType::error, "Ошибка", "Не могу прочитать файл `{}`."_format(file_name));
                 return;
             }
 
@@ -128,7 +128,7 @@ namespace States
             }
             else
             {
-                Interface::MessageBox(Interface::MessageBoxType::error, "Error", "Не могу использовать файл `{}`:\nОжидалось расширение `.gps` или `.gpss`."_format(file_name));
+                Interface::MessageBox(Interface::MessageBoxType::error, "Ошибка", "Не могу использовать файл `{}`:\nОжидалось расширение `.gps` или `.lis`."_format(file_name));
                 return;
             }
 
@@ -187,6 +187,7 @@ namespace States
             try
             {
                 tab.output = MemoryFile(tab.output_file_name).string();
+                tab.output.erase(std::remove_if(tab.output.begin(), tab.output.end(), [](char ch){return ch > 0 && ch < ' ' && ch != '\n' && ch != '\t';}), tab.output.end());
             }
             catch (...)
             {
@@ -243,7 +244,7 @@ namespace States
                     ImGui::Spacing();
                     ImGui::TextUnformatted(Str("Версия: ", version_string, "\nСборка от: " __DATE__ ", " __TIME__).c_str());
                     ImGui::Spacing();
-                    ImGui::TextUnformatted("Автор: Михайлов Егор\nТестировал: Холупко Евгений");
+                    ImGui::TextUnformatted("Авторы: Михайлов Егор, Холупко Евгений");
                     ImGui::Spacing();
                     ImGui::TextUnformatted(repo_link.c_str());
                     OnPlatform(WINDOWS)
@@ -313,12 +314,11 @@ namespace States
 
                 auto lambda_stdout = [&](const char *data, size_t size)
                 {
-                    std::cout << "-";
                     std::scoped_lock lock(process_data->output_mutex);
                     process_data->output.insert(process_data->output.end(), data, data+size);
                 };
 
-                process_data->process.emplace("gpssh.exe {}{} maxcom"_format(tabs[active_tab_index].input_file_name, debug ? " tv" : ""), "", lambda_stdout, lambda_stdout);
+                process_data->process.emplace("gpssh.exe \"{}\"{} maxcom"_format(tabs[active_tab_index].input_file_name, debug ? " tv" : ""), "", lambda_stdout, lambda_stdout);
 
                 process_data->process_ended = 0;
                 process_data->process_running = 1;
@@ -330,7 +330,6 @@ namespace States
                 {
                     process_data->process->get_exit_status();
                     process_data->process_ended = 1;
-                    std::cout << "Thread closed.";
                 });
                 process_data->thread.detach();
             }
