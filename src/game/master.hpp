@@ -5,7 +5,6 @@
 #include <mutex>
 #include <thread>
 
-#include "audio/complete.h"
 #include "gameutils/adaptive_viewport.h"
 #include "gameutils/config.h"
 #include "gameutils/render.h"
@@ -19,9 +18,18 @@
 #include "program/exit.h"
 #include "reflection/complete.h"
 #include "utils/clock.h"
+#include "utils/filesystem.h"
 #include "utils/format.h"
 #include "utils/meta.h"
 #include "utils/metronome.h"
 #include "utils/poly_storage.h"
 #include "utils/random.h"
 #include "utils/with.h"
+
+#ifdef PLATFORM_WINDOWS
+#include <windef.h>
+#include <winbase.h>
+#include <winuser.h>
+#include <shellapi.h>
+#undef MessageBox
+#endif

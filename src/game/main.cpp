@@ -1,11 +1,14 @@
 #include <process.hpp>
 
-const ivec2 screen_size(480, 270);
-Interface::Window window("Delta", screen_size * 2, Interface::windowed, Interface::WindowSettings{} with_(min_size = screen_size));
+const std::string version_string = "1.0.0 rc1";
+const std::string repo_link = "https://github.com/HolyBlackCat/gpss-gui";
+
+const ivec2 min_screen_size(480, 270);
+Interface::Window window("Gpss-gui", min_screen_size * 2, Interface::windowed, Interface::WindowSettings{} with_(min_size = min_screen_size));
 Graphics::DummyVertexArray dummy_vao;
 
 const Graphics::ShaderConfig shader_config = Graphics::ShaderConfig::Core();
-Interface::ImGuiController gui_controller(Poly::derived<Interface::ImGuiController::GraphicsBackend_Modern>, Interface::ImGuiController::Config{} with_(shader_header = shader_config.common_header));
+Interface::ImGuiController gui_controller(Poly::derived<Interface::ImGuiController::GraphicsBackend_Modern>, Interface::ImGuiController::Config{} with_(shader_header = shader_config.common_header, store_state_in_file = ""));
 
 Input::Mouse mouse;
 
@@ -13,6 +16,21 @@ ImFont *font_main;
 ImFont *font_mono;
 
 constexpr int modal_margin = 64;
+inline const std::string zero_width_space = "\xEF\xBB\xBF";
+
+inline std::string EscapeStringForWidgetName(const std::string &source_str)
+{
+    std::string ret;
+
+    for (char ch : source_str)
+    {
+        ret += ch;
+        if (ch == '#')
+            ret += zero_width_space;
+    }
+
+    return ret;
+}
 
 namespace States
 {
@@ -42,82 +60,137 @@ namespace States
 
         std::unique_ptr<ProcessData> process_data = std::make_unique<ProcessData>();
 
-        std::string current_file = "4"; // Without extension.
-        std::string current_code;
-        std::string current_output;
-        bool unsaved_changes = 0;
-        bool text_input_focused = 0;
-
-        Main()
+        struct Tab
         {
-            current_code = MemoryFile(current_file + ".gps").string();
-            FilterCharacters(current_code);
-            LoadOutput();
-        }
+            std::string pretty_name;
+            std::string input_file_name;
+            std::string output_file_name;
+            std::string output;
+            unsigned int id = 0;
 
-        void FilterCharacters(std::string &str)
-        {
-            std::string new_str;
-            new_str.reserve(str.size());
-            int line_len = 0;
-            for (char ch : str)
+            void LoadOutput(bool *ok = 0)
             {
-                if (ch == '\n')
+                try
                 {
-                    line_len = 0;
-                    new_str += '\n';
-                    continue;
+                    output = MemoryFile(output_file_name).string();
+                    if (ok)
+                        *ok = 1;
                 }
-
-                if (ch == '\t')
+                catch (...)
                 {
-                    // We can't do anything fancy here, because ImGui always renders tabs as 4 spaces, and this function shouldn't change how the text looks.
-                    constexpr int tab_size = 4;
-                    line_len += tab_size;
-                    new_str += std::string(tab_size, ' ');
-                    continue;
+                    output = "";
+                    if (ok)
+                        *ok = 0;
+                    else
+                        Interface::MessageBox(Interface::MessageBoxType::warning, "Error", "Не могу прочитать выходной файл `{}`."_format(output_file_name));
                 }
-
-                if (ch >= 0 && ch < ' ')
-                    continue;
-
-                line_len++;
-                new_str.push_back(ch);
             }
+        };
+        std::vector<Tab> tabs;
+        unsigned int tab_counter = 0;
+        int active_tab_index = -1;
 
-            str = std::move(new_str);
+        bool HaveActiveTab()
+        {
+            return active_tab_index >= 0 && active_tab_index < int(tabs.size());
         }
 
-        void SaveChanges()
+        bool HaveTabNamed(std::string name)
         {
-            if (!unsaved_changes)
-                return;
+            return std::find_if(tabs.begin(), tabs.end(), [&](const Tab &tab){return tab.pretty_name == name;}) != tabs.end();
+        }
 
-            unsaved_changes = 0;
-
+        void AddTab(std::string file_name)
+        {
             try
             {
-                std::string str = current_code;
-                FilterCharacters(str); // We modify a copy because text editing widget doesn't like its data being modified when it's active.
-                const uint8_t *data = reinterpret_cast<const uint8_t *>(str.c_str());
-                MemoryFile::Save(current_file + ".gps", data, data + str.size());
+                Filesystem::GetObjectInfo(file_name);
             }
-            catch (std::exception &e)
+            catch (...)
             {
-                Program::Error("Не могу сохранить файл.\n", e.what());
+                Interface::MessageBox(Interface::MessageBoxType::error, "Error", "Не могу прочитать файл `{}`."_format(file_name));
+                return;
             }
+
+            std::string file_name_low = file_name;
+            for (char &ch : file_name_low)
+                if (ch > 0)
+                    ch = std::tolower(ch);
+
+            bool is_input;
+            if (Strings::EndsWith(file_name_low, ".gps"))
+            {
+                is_input = 1;
+            }
+            else if (Strings::EndsWith(file_name_low, ".lis"))
+            {
+                is_input = 0;
+            }
+            else
+            {
+                Interface::MessageBox(Interface::MessageBoxType::error, "Error", "Не могу использовать файл `{}`:\nОжидалось расширение `.gps` или `.gpss`."_format(file_name));
+                return;
+            }
+
+            Tab new_tab;
+            new_tab.id = tab_counter++;
+
+            char dir_separator = OnPlatform(WINDOWS)('\\') NotOnPlatform(WINDOWS)('/');
+            if (auto pos = file_name.find_last_of(dir_separator); pos != std::string::npos)
+                new_tab.pretty_name = file_name.substr(pos + 1);
+            else
+                new_tab.pretty_name = file_name;
+            new_tab.pretty_name.resize(new_tab.pretty_name.size() - 4);
+            if (HaveTabNamed(new_tab.pretty_name))
+            {
+                int index = 2;
+                std::string new_name;
+                while (1)
+                {
+                    new_name = "{} [{}]"_format(new_tab.pretty_name, index);
+                    if (!HaveTabNamed(new_name))
+                    {
+                        new_tab.pretty_name = std::move(new_name);
+                        break;
+                    }
+                    index++;
+                }
+            }
+
+            new_tab.input_file_name = file_name;
+            new_tab.output_file_name = file_name;
+            if (is_input)
+            {
+                new_tab.output_file_name.resize(new_tab.output_file_name.size() - 4);
+                new_tab.output_file_name += ".lis";
+            }
+            else
+            {
+                new_tab.input_file_name.resize(new_tab.input_file_name.size() - 4);
+                new_tab.input_file_name += ".gps";
+            }
+
+            bool output_ok;
+            new_tab.LoadOutput(&output_ok);
+            (void)output_ok;
+
+            tabs.push_back(std::move(new_tab));
         }
 
         void LoadOutput()
         {
+            if (!HaveActiveTab())
+                return;
+
+            Tab &tab = tabs[active_tab_index];
+
             try
             {
-                current_output = MemoryFile(current_file + ".lis").string();
-                FilterCharacters(current_output);
+                tab.output = MemoryFile(tab.output_file_name).string();
             }
             catch (...)
             {
-                current_output = "";
+                tab.output = "";
             }
         }
 
@@ -137,26 +210,19 @@ namespace States
 
             bool run = 0;
             bool debug = 0;
+            bool about = 0;
 
             if (ImGui::BeginMenuBar())
             {
-                if (ImGui::BeginMenu("Файл"))
-                {
-                    ImGui::MenuItem("Открыть");
-
-                    if (ImGui::MenuItem("Сохранить", "Ctrl+S"))
-                        SaveChanges();
-
-                    ImGui::EndMenu();
-                }
-                if ((Input::Button(Input::l_ctrl).down() || Input::Button(Input::r_ctrl).down()) && Input::Button(Input::s).pressed())
-                    SaveChanges();
-
-                if (ImGui::MenuItem("Запустить (F9)") || Input::Button(Input::f9).pressed())
+                if (ImGui::MenuItem("Запустить (F9)", nullptr, nullptr, HaveActiveTab()) || Input::Button(Input::f9).pressed())
                     run = 1;
 
-                if (ImGui::MenuItem("Отладить (F10)") || Input::Button(Input::f10).pressed())
+                if (ImGui::MenuItem("Отладить (F10)", nullptr, nullptr, HaveActiveTab()) || Input::Button(Input::f10).pressed())
                     debug = 1;
+
+
+                if (ImGui::MenuItem("О программе"))
+                    about = 1;
 
                 ImGui::EndMenuBar();
             }
@@ -164,10 +230,83 @@ namespace States
             ImGui::PopStyleVar(1);
             ImGui::PopStyleVar(3);
 
-            if (run || debug)
-            {
-                SaveChanges();
+            constexpr const char *about_modal_name = "О программе";
+            if (about)
+                ImGui::OpenPopup(about_modal_name);
 
+            if (ImGui::IsPopupOpen(about_modal_name))
+            {
+                bool open = 1;
+                if (ImGui::BeginPopupModal(about_modal_name, &open, ImGuiWindowFlags_NoMove | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_AlwaysAutoResize))
+                {
+                    ImGui::TextUnformatted("GPSS-GUI");
+                    ImGui::Spacing();
+                    ImGui::TextUnformatted(Str("Версия: ", version_string, "\nСборка от: " __DATE__ ", " __TIME__).c_str());
+                    ImGui::Spacing();
+                    ImGui::TextUnformatted("Автор: Михайлов Егор\nТестировал: Холупко Евгений");
+                    ImGui::Spacing();
+                    ImGui::TextUnformatted(repo_link.c_str());
+                    OnPlatform(WINDOWS)
+                    (
+                        if (ImGui::IsItemHovered())
+                            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+
+                        if (ImGui::IsItemClicked())
+                            ShellExecuteA(NULL, "open", repo_link.c_str(), NULL, NULL, SW_SHOWNORMAL);
+                    )
+
+                    ImGui::Spacing();
+                    if (ImGui::Button("Закрыть"))
+                        ImGui::CloseCurrentPopup();
+
+                    ImGui::EndPopup();
+                }
+            }
+
+            if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_AutoSelectNewTabs | ImGuiTabBarFlags_NoCloseWithMiddleMouseButton | ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_Reorderable))
+            {
+                bool have_active_tab = HaveActiveTab(); // We remember the value now, to avoid 1 frame jitter when closing a tab.
+
+                for (size_t i = 0; i < tabs.size(); i++)
+                {
+                    bool open = 1;
+
+                    if (ImGui::BeginTabItem(Str(EscapeStringForWidgetName(tabs[i].pretty_name), "###", tabs[i].id).c_str(), &open))
+                    {
+                        active_tab_index = i;
+
+                        if (tabs[i].output.empty())
+                        {
+                            ImGui::TextUnformatted("Программа еще не была запущена.");
+                            ImGui::SameLine();
+                            if (ImGui::SmallButton("Запустить"))
+                                run = 1;
+                        }
+                        else
+                        {
+                            ImGui::PushFont(font_mono);
+                            ImGui::InputTextMultiline("###output", tabs[i].output.data(), tabs[i].output.size(), ImGui::GetContentRegionAvail(), ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll);
+                            ImGui::PopFont();
+                        }
+
+                        ImGui::EndTabItem();
+                    }
+
+                    if (!open)
+                    {
+                        tabs.erase(tabs.begin() + i);
+                        i--;
+                    }
+                }
+
+                ImGui::EndTabBar();
+
+                if (!have_active_tab)
+                    ImGui::TextDisabled("%s", "Перетащите файл в это окно, чтобы открыть его.");
+            }
+
+            if ((run || debug) && !process_data->process_running && HaveActiveTab())
+            {
                 ImGui::OpenPopup("gpss_running");
 
                 process_data->output = "";
@@ -179,7 +318,7 @@ namespace States
                     process_data->output.insert(process_data->output.end(), data, data+size);
                 };
 
-                process_data->process.emplace("gpssh.exe {}{}"_format(current_file, debug ? " tv" : ""), "", lambda_stdout, lambda_stdout);
+                process_data->process.emplace("gpssh.exe {}{} maxcom"_format(tabs[active_tab_index].input_file_name, debug ? " tv" : ""), "", lambda_stdout, lambda_stdout);
 
                 process_data->process_ended = 0;
                 process_data->process_running = 1;
@@ -205,45 +344,6 @@ namespace States
             }
 
             clamp_var(process_data->popup_alpha += (ImGui::IsPopupOpen("gpss_running") ? 0.05 : -2), 0.00001, 1); // For some reason ImGui doesn't like alpha == 0, so we use a small number instead.
-
-            if (ImGui::BeginTabBar("tabs"))
-            {
-                if (ImGui::BeginTabItem("Программа"))
-                {
-                    ImGui::PushFont(font_mono);
-                    if (ImGui::InputTextMultiline("###code_input_", &current_code, ImGui::GetContentRegionAvail(), ImGuiInputTextFlags_AllowTabInput))
-                        unsaved_changes = 1;
-
-                    bool text_input_focused_now = ImGui::IsItemActive();
-
-                    if (!text_input_focused_now && text_input_focused)
-                        FilterCharacters(current_code);
-
-                    text_input_focused = text_input_focused_now;
-
-                    ImGui::PopFont();
-
-                    ImGui::EndTabItem();
-                }
-
-                if (ImGui::BeginTabItem("Результат", 0, proc_ended * ImGuiTabItemFlags_SetSelected))
-                {
-                    if (current_output.empty())
-                    {
-                        ImGui::TextDisabled("%s", "Программа еще не была запущена.");
-                    }
-                    else
-                    {
-                        ImGui::PushFont(font_mono);
-                        ImGui::InputTextMultiline("###output", current_output.data(), current_output.size(), ImGui::GetContentRegionAvail(), ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll);
-                        ImGui::PopFont();
-                    }
-
-                    ImGui::EndTabItem();
-                }
-
-                ImGui::EndTabBar();
-            }
 
             if (ImGui::IsPopupOpen("gpss_running"))
             {
@@ -308,6 +408,8 @@ namespace States
 
             ImGui::End();
 
+            for (const auto &file_name : window.DroppedFiles())
+                AddTab(file_name);
 
             // ImGui::ShowDemoWindow();
         }
@@ -320,7 +422,7 @@ namespace States
     };
 }
 
-int main()
+int main(int argc, char **argv)
 {
     { // Initialize
         ImGui::StyleColorsLight();
@@ -351,18 +453,21 @@ int main()
         ImFontGlyphRangesBuilder builder;
         builder.AddRanges(ImGui::GetIO().Fonts->GetGlyphRangesDefault());
         builder.AddRanges(ImGui::GetIO().Fonts->GetGlyphRangesCyrillic());
+        builder.AddText(zero_width_space.c_str());
         ImVector<ImWchar> ranges;
         builder.BuildRanges(&ranges);
 
-        font_main = gui_controller.LoadFont("assets/Roboto-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = ImGuiFreeType::ForceAutoHint), ranges.Data);
-        font_mono = gui_controller.LoadFont("assets/RobotoMono-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = ImGuiFreeType::LightHinting), ranges.Data);
+        font_main = gui_controller.LoadFont("Roboto-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = ImGuiFreeType::ForceAutoHint), ranges.Data);
+        font_mono = gui_controller.LoadFont("RobotoMono-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = ImGuiFreeType::LightHinting), ranges.Data);
         gui_controller.RenderFontsWithFreetype();
 
         Graphics::Blending::Enable();
         Graphics::Blending::FuncNormalPre();
     }
 
-    States::current_state = Poly::derived<States::Main>;
+    auto &new_state = States::current_state.assign<States::Main>();
+    for (int i = 1; i < argc; i++)
+        new_state.AddTab(argv[i]);
 
     Metronome metronome(60);
     Clock::DeltaTimer delta_timer;
@@ -389,5 +494,10 @@ int main()
         gui_controller.PostRender();
 
         window.SwapBuffers();
+
+        double frame_len = Clock::TicksToSeconds(Clock::Time() - delta_timer.LastTimePoint());
+        uint64_t target_frame_len = 1.0 / metronome.Frequency();
+        if (target_frame_len > frame_len)
+            Clock::WaitSeconds((target_frame_len - frame_len) * 0.9);
     }
 }
