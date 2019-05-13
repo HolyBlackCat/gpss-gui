@@ -1,6 +1,6 @@
 
 
-const std::string version_string = "1.0.0 rc3";
+const std::string version_string = "1.0.0 rc4";
 const std::string repo_link = "https://github.com/HolyBlackCat/gpss-gui";
 
 const ivec2 min_screen_size(480, 270);
@@ -77,6 +77,7 @@ namespace States
                 try
                 {
                     output = MemoryFile(output_file_name).string();
+                    output.erase(std::remove_if(output.begin(), output.end(), [](char ch){return ch > 0 && ch < ' ' && ch != '\n' && ch != '\t';}), output.end());
                     if (ok)
                         *ok = 1;
                 }
@@ -185,17 +186,7 @@ namespace States
             if (!HaveActiveTab())
                 return;
 
-            Tab &tab = tabs[active_tab_index];
-
-            try
-            {
-                tab.output = MemoryFile(tab.output_file_name).string();
-                tab.output.erase(std::remove_if(tab.output.begin(), tab.output.end(), [](char ch){return ch > 0 && ch < ' ' && ch != '\n' && ch != '\t';}), tab.output.end());
-            }
-            catch (...)
-            {
-                tab.output = "";
-            }
+            tabs[active_tab_index].LoadOutput();
         }
 
 
