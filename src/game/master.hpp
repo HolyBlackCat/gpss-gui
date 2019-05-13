@@ -26,6 +26,8 @@
 #include "utils/random.h"
 #include "utils/with.h"
 
+#include <process.hpp>
+
 #ifdef PLATFORM_WINDOWS
 #include <windef.h>
 #include <winbase.h>

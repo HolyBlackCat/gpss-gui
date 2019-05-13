@@ -1,6 +1,6 @@
-#include <process.hpp>
 
-const std::string version_string = "1.0.0 rc2";
+
+const std::string version_string = "1.0.0 rc3";
 const std::string repo_link = "https://github.com/HolyBlackCat/gpss-gui";
 
 const ivec2 min_screen_size(480, 270);
@@ -12,13 +12,17 @@ Interface::ImGuiController gui_controller(Poly::derived<Interface::ImGuiControll
 
 Input::Mouse mouse;
 
-ImFont *font_main;
-ImFont *font_mono;
+ImFont *font_main = 0;
+ImFont *font_mono = 0;
 
 constexpr int modal_margin = 64;
-inline const std::string zero_width_space = "\xEF\xBB\xBF";
+const std::string zero_width_space = "\xEF\xBB\xBF";
+constexpr char dir_separator = OnPlatform(WINDOWS)('\\') NotOnPlatform(WINDOWS)('/');
 
-inline std::string EscapeStringForWidgetName(const std::string &source_str)
+std::string path_prefix;
+
+
+std::string EscapeStringForWidgetName(const std::string &source_str)
 {
     std::string ret;
 
@@ -135,7 +139,6 @@ namespace States
             Tab new_tab;
             new_tab.id = tab_counter++;
 
-            char dir_separator = OnPlatform(WINDOWS)('\\') NotOnPlatform(WINDOWS)('/');
             if (auto pos = file_name.find_last_of(dir_separator); pos != std::string::npos)
                 new_tab.pretty_name = file_name.substr(pos + 1);
             else
@@ -201,7 +204,7 @@ namespace States
             ImGui::SetNextWindowPos(ivec2(0));
             ImGui::SetNextWindowSize(window.Size());
 
-            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ivec2(2,1));
+            ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ivec2(2,2));
             ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0);
             ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0);
 
@@ -308,30 +311,57 @@ namespace States
 
             if ((run || debug) && !process_data->process_running && HaveActiveTab())
             {
-                ImGui::OpenPopup("gpss_running");
+                bool can_start = 1;
 
-                process_data->output = "";
-
-                auto lambda_stdout = [&](const char *data, size_t size)
+                try
                 {
-                    std::scoped_lock lock(process_data->output_mutex);
-                    process_data->output.insert(process_data->output.end(), data, data+size);
-                };
-
-                process_data->process.emplace("gpssh.exe \"{}\"{} maxcom"_format(tabs[active_tab_index].input_file_name, debug ? " tv" : ""), "", lambda_stdout, lambda_stdout);
-
-                process_data->process_ended = 0;
-                process_data->process_running = 1;
-                process_data->should_close_popup_automatically = -1;
-                process_data->popup_alpha = 0;
-                process_data->using_debugger = debug;
-
-                process_data->thread = std::thread([&]
+                    (void)Filesystem::GetObjectInfo(tabs[active_tab_index].input_file_name);
+                }
+                catch (...)
                 {
-                    process_data->process->get_exit_status();
-                    process_data->process_ended = 1;
-                });
-                process_data->thread.detach();
+                    can_start = 0;
+                    Interface::MessageBox(Interface::MessageBoxType::error, "Ошибка", "Не найден файл с исходным кодом: `{}`."_format(tabs[active_tab_index].input_file_name));
+                }
+
+                std::string gpss_path = path_prefix + "gpssh.exe";
+
+                try
+                {
+                    (void)Filesystem::GetObjectInfo(gpss_path);
+                }
+                catch (...)
+                {
+                    can_start = 0;
+                    Interface::MessageBox(Interface::MessageBoxType::error, "Ошибка", "Не найден исполняемый файл: `{}`."_format(gpss_path));
+                }
+
+                if (can_start)
+                {
+                    ImGui::OpenPopup("gpss_running");
+
+                    process_data->output = "";
+
+                    auto lambda_stdout = [&](const char *data, size_t size)
+                    {
+                        std::scoped_lock lock(process_data->output_mutex);
+                        process_data->output.insert(process_data->output.end(), data, data+size);
+                    };
+
+                    process_data->process.emplace("{} \"{}\"{} maxcom"_format(gpss_path, tabs[active_tab_index].input_file_name, debug ? " tv" : ""), "", lambda_stdout, lambda_stdout);
+
+                    process_data->process_ended = 0;
+                    process_data->process_running = 1;
+                    process_data->should_close_popup_automatically = -1;
+                    process_data->popup_alpha = 0;
+                    process_data->using_debugger = debug;
+
+                    process_data->thread = std::thread([&]
+                    {
+                        process_data->process->get_exit_status();
+                        process_data->process_ended = 1;
+                    });
+                    process_data->thread.detach();
+                }
             }
 
             bool proc_ended = process_data->process_ended;
@@ -423,6 +453,14 @@ namespace States
 
 int main(int argc, char **argv)
 {
+    // Get installation directory
+    if (argc >= 1)
+    {
+        std::string command = argv[0];
+        if (auto pos = command.find_last_of(dir_separator); pos != std::string::npos)
+            path_prefix = command.substr(0, pos) + dir_separator;
+    }
+
     { // Initialize
         ImGui::StyleColorsLight();
 
@@ -456,12 +494,14 @@ int main(int argc, char **argv)
         ImVector<ImWchar> ranges;
         builder.BuildRanges(&ranges);
 
-        font_main = gui_controller.LoadFont("Roboto-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = ImGuiFreeType::ForceAutoHint), ranges.Data);
-        font_mono = gui_controller.LoadFont("RobotoMono-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = ImGuiFreeType::LightHinting), ranges.Data);
+        font_main = gui_controller.LoadFont(path_prefix + "Roboto-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = ImGuiFreeType::ForceAutoHint), ranges.Data);
+        font_mono = gui_controller.LoadFont(path_prefix + "RobotoMono-Regular.ttf", 16, ImFontConfig{} with(RasterizerFlags = ImGuiFreeType::LightHinting), ranges.Data);
         gui_controller.RenderFontsWithFreetype();
 
         Graphics::Blending::Enable();
         Graphics::Blending::FuncNormalPre();
+
+        SDL_SetHint(SDL_HINT_MOUSE_FOCUS_CLICKTHROUGH, "1");
     }
 
     auto &new_state = States::current_state.assign<States::Main>();
