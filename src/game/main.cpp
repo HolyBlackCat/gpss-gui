@@ -1,10 +1,11 @@
 
 
-const std::string version_string = "1.0.0 rc4";
+const std::string version_string = "1.0.0 rc5";
 const std::string repo_link = "https://github.com/HolyBlackCat/gpss-gui";
 
 const ivec2 min_screen_size(480, 270);
-Interface::Window window("Gpss-gui", min_screen_size * 2, Interface::windowed, Interface::WindowSettings{} with_(min_size = min_screen_size));
+const std::string base_window_title = "Gpss-gui";
+Interface::Window window(base_window_title, min_screen_size * 2, Interface::windowed, Interface::WindowSettings{} with_(min_size = min_screen_size));
 Graphics::DummyVertexArray dummy_vao;
 
 const Graphics::ShaderConfig shader_config = Graphics::ShaderConfig::Core();
@@ -21,6 +22,16 @@ constexpr char dir_separator = OnPlatform(WINDOWS)('\\') NotOnPlatform(WINDOWS)(
 
 std::string path_prefix;
 
+std::string window_title = base_window_title;
+
+void SetWindowTitle(std::string new_title)
+{
+    if (window_title == new_title)
+        return;
+
+    window_title = std::move(new_title);
+    window.SetTitle(window_title);
+}
 
 std::string EscapeStringForWidgetName(const std::string &source_str)
 {
@@ -57,6 +68,7 @@ namespace States
             int should_close_popup_automatically = -1; // -1 means not decided yet.
             float popup_alpha = 1;
             bool using_debugger = 0;
+            int ticks_running = 0;
 
             std::string output;
             std::mutex output_mutex;
@@ -69,7 +81,9 @@ namespace States
             std::string pretty_name;
             std::string input_file_name;
             std::string output_file_name;
+            std::string generic_file_name;
             std::string output;
+            bool no_output_file = 1;
             unsigned int id = 0;
 
             void LoadOutput(bool *ok = 0)
@@ -78,12 +92,14 @@ namespace States
                 {
                     output = MemoryFile(output_file_name).string();
                     output.erase(std::remove_if(output.begin(), output.end(), [](char ch){return ch > 0 && ch < ' ' && ch != '\n' && ch != '\t';}), output.end());
+                    no_output_file = 0;
                     if (ok)
                         *ok = 1;
                 }
                 catch (...)
                 {
                     output = "";
+                    no_output_file = 1;
                     if (ok)
                         *ok = 0;
                     else
@@ -151,7 +167,7 @@ namespace States
                 std::string new_name;
                 while (1)
                 {
-                    new_name = "{} [{}]"_format(new_tab.pretty_name, index);
+                    new_name = "{} ({})"_format(new_tab.pretty_name, index);
                     if (!HaveTabNamed(new_name))
                     {
                         new_tab.pretty_name = std::move(new_name);
@@ -166,11 +182,13 @@ namespace States
             if (is_input)
             {
                 new_tab.output_file_name.resize(new_tab.output_file_name.size() - 4);
+                new_tab.generic_file_name = new_tab.output_file_name;
                 new_tab.output_file_name += ".lis";
             }
             else
             {
                 new_tab.input_file_name.resize(new_tab.input_file_name.size() - 4);
+                new_tab.generic_file_name = new_tab.input_file_name;
                 new_tab.input_file_name += ".gps";
             }
 
@@ -192,6 +210,9 @@ namespace States
 
         void Tick() override
         {
+            for (const auto &file_name : window.DroppedFiles())
+                AddTab(file_name);
+
             ImGui::SetNextWindowPos(ivec2(0));
             ImGui::SetNextWindowSize(window.Size());
 
@@ -214,7 +235,6 @@ namespace States
 
                 if (ImGui::MenuItem("Отладить (F10)", nullptr, nullptr, HaveActiveTab()) || Input::Button(Input::f10).pressed())
                     debug = 1;
-
 
                 if (ImGui::MenuItem("О программе"))
                     about = 1;
@@ -258,46 +278,53 @@ namespace States
                 }
             }
 
-            if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_AutoSelectNewTabs | ImGuiTabBarFlags_NoCloseWithMiddleMouseButton | ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_Reorderable))
-            {
+            { // Tabs
                 bool have_active_tab = HaveActiveTab(); // We remember the value now, to avoid 1 frame jitter when closing a tab.
 
-                for (size_t i = 0; i < tabs.size(); i++)
+                if (ImGui::BeginTabBar("tabs", ImGuiTabBarFlags_AutoSelectNewTabs | ImGuiTabBarFlags_NoCloseWithMiddleMouseButton | ImGuiTabBarFlags_FittingPolicyScroll | ImGuiTabBarFlags_Reorderable | ImGuiTabBarFlags_NoTooltip))
                 {
-                    bool open = 1;
-
-                    if (ImGui::BeginTabItem(Str(EscapeStringForWidgetName(tabs[i].pretty_name), "###", tabs[i].id).c_str(), &open))
+                    for (size_t i = 0; i < tabs.size(); i++)
                     {
-                        active_tab_index = i;
+                        bool open = 1;
 
-                        if (tabs[i].output.empty())
+                        if (ImGui::BeginTabItem(Str(EscapeStringForWidgetName(tabs[i].pretty_name), "###", tabs[i].id).c_str(), &open))
                         {
-                            ImGui::TextUnformatted("Программа еще не была запущена.");
-                            ImGui::SameLine();
-                            if (ImGui::SmallButton("Запустить"))
-                                run = 1;
-                        }
-                        else
-                        {
-                            ImGui::PushFont(font_mono);
-                            ImGui::InputTextMultiline("###output", tabs[i].output.data(), tabs[i].output.size(), ImGui::GetContentRegionAvail(), ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll);
-                            ImGui::PopFont();
+                            SetWindowTitle("{} - {}"_format(base_window_title, tabs[i].generic_file_name));
+
+                            active_tab_index = i;
+
+                            if (tabs[i].no_output_file)
+                            {
+                                ImGui::TextUnformatted("Программа ещё не была запущена.");
+                                ImGui::SameLine();
+                                if (ImGui::SmallButton("Запустить"))
+                                    run = 1;
+                            }
+                            else
+                            {
+                                ImGui::PushFont(font_mono);
+                                ImGui::InputTextMultiline("###output", tabs[i].output.data(), tabs[i].output.size(), ImGui::GetContentRegionAvail(), ImGuiInputTextFlags_ReadOnly | ImGuiInputTextFlags_NoHorizontalScroll);
+                                ImGui::PopFont();
+                            }
+
+                            ImGui::EndTabItem();
                         }
 
-                        ImGui::EndTabItem();
+                        if (!open)
+                        {
+                            tabs.erase(tabs.begin() + i);
+                            i--;
+                        }
                     }
 
-                    if (!open)
-                    {
-                        tabs.erase(tabs.begin() + i);
-                        i--;
-                    }
+                    ImGui::EndTabBar();
                 }
 
-                ImGui::EndTabBar();
-
                 if (!have_active_tab)
+                {
+                    SetWindowTitle(base_window_title);
                     ImGui::TextDisabled("%s", "Перетащите файл в это окно, чтобы открыть его.");
+                }
             }
 
             if ((run || debug) && !process_data->process_running && HaveActiveTab())
@@ -345,6 +372,7 @@ namespace States
                     process_data->should_close_popup_automatically = -1;
                     process_data->popup_alpha = 0;
                     process_data->using_debugger = debug;
+                    process_data->ticks_running = 0;
 
                     process_data->thread = std::thread([&]
                     {
@@ -367,6 +395,8 @@ namespace States
 
             if (ImGui::IsPopupOpen("gpss_running"))
             {
+                process_data->ticks_running++;
+
                 ImGui::SetNextWindowPos(ivec2(modal_margin));
                 ImGui::SetNextWindowSize(window.Size() - 2 * modal_margin);
 
@@ -374,25 +404,35 @@ namespace States
 
                 if (ImGui::BeginPopupModal("gpss_running", 0, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
                 {
+                    int status_text_offset_y = 0;
+
+                    // Progress bar
                     if (process_data->process_running)
                     {
-                        ImGui::TextUnformatted("Работаю...");
-
+                        ImGui::PushStyleColor(ImGuiCol_PlotHistogram, fvec4(0.1,0.5,0.9,1)); // Works as a progress bar color here.
+                        ImGui::PushStyleColor(ImGuiCol_Border, fvec3(0).to_vec4(1));
+                        ImGui::ProgressBar(sin(process_data->ticks_running / 30.) * 0.45 + 0.5, ivec2(ImGui::GetFrameHeight()), "");
+                        ImGui::PopStyleColor(2);
                         ImGui::SameLine();
-
-                        if (ImGui::SmallButton("Прервать") || Input::Button(Input::escape).pressed())
-                        {
-                            process_data->process->kill();
-                            ImGui::CloseCurrentPopup();
-                        }
                     }
                     else
                     {
-                        if (ImGui::SmallButton("Закрыть") || Input::Button(Input::escape).pressed())
-                        {
+                        status_text_offset_y = ImGui::GetStyle().FramePadding.y;
+                    }
+
+                    std::string close_button_text = process_data->process_running ? "Прервать" : "Закрыть";
+
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() + status_text_offset_y);
+                    ImGui::TextUnformatted(process_data->process_running ? "Работаю..." : "Готово");
+                    ImGui::SameLine();
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize(close_button_text.c_str()).x - ImGui::GetStyle().FramePadding.x * 2);
+                    ImGui::SetCursorPosY(ImGui::GetCursorPosY() - status_text_offset_y);
+
+                    if (ImGui::Button(close_button_text.c_str()) || Input::Button(Input::escape).pressed())
+                    {
+                        if (process_data->process_running)
                             process_data->process->kill();
-                            ImGui::CloseCurrentPopup();
-                        }
+                        ImGui::CloseCurrentPopup();
                     }
 
                     if (proc_ended)
@@ -427,9 +467,6 @@ namespace States
             }
 
             ImGui::End();
-
-            for (const auto &file_name : window.DroppedFiles())
-                AddTab(file_name);
 
             // ImGui::ShowDemoWindow();
         }
