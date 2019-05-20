@@ -1,6 +1,6 @@
 
 
-const std::string version_string = "1.0.0 rc6";
+const std::string version_string = "1.0.0";
 const std::string repo_link = "https://github.com/HolyBlackCat/gpss-gui";
 
 const ivec2 min_screen_size(480, 270);
