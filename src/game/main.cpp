@@ -1,6 +1,6 @@
 
 
-const std::string version_string = "1.0.0 rc5";
+const std::string version_string = "1.0.0 rc6";
 const std::string repo_link = "https://github.com/HolyBlackCat/gpss-gui";
 
 const ivec2 min_screen_size(480, 270);
@@ -110,6 +110,8 @@ namespace States
         std::vector<Tab> tabs;
         unsigned int tab_counter = 0;
         int active_tab_index = -1;
+
+        std::string gpss_params = "maxcom";
 
         bool HaveActiveTab()
         {
@@ -235,6 +237,13 @@ namespace States
 
                 if (ImGui::MenuItem("Отладить (F10)", nullptr, nullptr, HaveActiveTab()) || Input::Button(Input::f10).pressed())
                     debug = 1;
+
+                if (ImGui::BeginMenu("Настройки"))
+                {
+                    ImGui::TextUnformatted("Параметры командной строки GPSS");
+                    ImGui::InputText("", &gpss_params);
+                    ImGui::EndMenu();
+                }
 
                 if (ImGui::MenuItem("О программе"))
                     about = 1;
@@ -365,7 +374,8 @@ namespace States
                         process_data->output.insert(process_data->output.end(), data, data+size);
                     };
 
-                    process_data->process.emplace("{} \"{}\"{} maxcom"_format(gpss_path, tabs[active_tab_index].input_file_name, debug ? " tv" : ""), "", lambda_stdout, lambda_stdout);
+                    process_data->process.emplace("{} \"{}\"{} {}"_format(gpss_path, tabs[active_tab_index].input_file_name, debug ? " tv" : "", gpss_params), "", lambda_stdout, lambda_stdout, true);
+                    process_data->process->write("Cancel\n");
 
                     process_data->process_ended = 0;
                     process_data->process_running = 1;
@@ -442,7 +452,8 @@ namespace States
                             process_data->should_close_popup_automatically =
                                 process_data->output.find("***") == std::string::npos &&
                                 process_data->output.find("Error") == std::string::npos &&
-                                process_data->output.find("Warning") == std::string::npos; // I've never seen "Warning" in output, but I want to be extra safe.
+                                process_data->output.find("Warning") == std::string::npos && // I've never seen "Warning" in output, but I want to be extra safe.
+                                process_data->output.find("invalid option") == std::string::npos;
                         }
 
                         if (process_data->should_close_popup_automatically)
