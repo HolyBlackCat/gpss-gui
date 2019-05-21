@@ -1,6 +1,6 @@
 
 
-const std::string version_string = "1.0.0";
+const std::string version_string = "1.0.1 rc 1";
 const std::string repo_link = "https://github.com/HolyBlackCat/gpss-gui";
 
 const ivec2 min_screen_size(480, 270);
@@ -547,7 +547,7 @@ int main(int argc, char **argv)
     for (int i = 1; i < argc; i++)
         new_state.AddTab(argv[i]);
 
-    Metronome metronome(60);
+    Metronome metronome(30);
     Clock::DeltaTimer delta_timer;
 
     while (1)
